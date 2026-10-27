@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Vitalog 접근 승인</title>
+<style>
+  :root { color-scheme: light dark; font-family: -apple-system, system-ui, sans-serif; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+  main { width: min(92vw, 380px); padding: 24px 0; }
+  h1 { font-size: 1.25rem; margin: 0 0 16px; }
+  p, li { line-height: 1.5; }
+  .box { border: 1px solid #8884; border-radius: 12px; padding: 16px; margin: 16px 0; }
+  .muted { color: #888; font-size: 0.875rem; word-break: break-all; }
+  form { display: grid; gap: 12px; }
+  input, button { font: inherit; padding: 10px 12px; border-radius: 8px; border: 1px solid #8886; }
+  .row { display: flex; gap: 12px; }
+  .row button { flex: 1; }
+  button.primary { background: #0a7; color: #fff; border-color: #0a7; }
+  .error { color: #d33; }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Vitalog 접근 승인</h1>
+  <p id="status">확인하는 중입니다.</p>
+
+  <form id="login" hidden>
+    <input id="email" type="email" placeholder="이메일" autocomplete="username" required>
+    <input id="password" type="password" placeholder="비밀번호" autocomplete="current-password" required>
+    <button class="primary" type="submit">로그인</button>
+  </form>
+
+  <section id="consent" hidden>
+    <div class="box">
+      <p><strong id="client"></strong> 이(가) <strong id="account"></strong> 계정의 건강 데이터를 <strong>읽기만</strong> 하려고 합니다.</p>
+      <p class="muted">승인하면 돌아갈 주소: <span id="redirect"></span></p>
+      <p class="muted">요청 범위: <span id="scope"></span></p>
+    </div>
+    <div class="row">
+      <button id="deny" type="button">거부</button>
+      <button id="approve" class="primary" type="button">승인</button>
+    </div>
+  </section>
+</main>
+
+<script src="/config.js"></script>
+<script type="module">
+import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.80.0/+esm";
+
+const { supabaseUrl, supabaseKey } = window.VITALOG_CONFIG;
+const supabase = createClient(supabaseUrl, supabaseKey);
+const authorizationId = new URLSearchParams(location.search).get("authorization_id");
+
+const $ = (id) => document.getElementById(id);
+const show = (id) => { $("login").hidden = id !== "login"; $("consent").hidden = id !== "consent"; };
+const say = (text, isError = false) => {
+  $("status").textContent = text;
+  $("status").className = isError ? "error" : "";
+};
+
+async function start() {
+  if (!authorizationId) { say("승인 요청 정보가 없습니다.", true); return; }
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) { say("먼저 로그인해 주세요."); show("login"); return; }
+  await showDetails();
+}
+
+async function showDetails() {
+  show(null);
+  const { data, error } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId);
+  if (error?.status === 401 || error?.status === 403) {
+    await supabase.auth.signOut({ scope: "local" });
+    say("로그인이 만료되었습니다. 다시 로그인해 주세요.");
+    show("login");
+    return;
+  }
+  if (error) { say(`승인 요청을 불러오지 못했습니다: ${error.message}`, true); return; }
+  if (!("authorization_id" in data)) { location.replace(data.redirect_url); return; }
+  $("client").textContent = data.client.name || `클라이언트 ${data.client.id}`;
+  $("account").textContent = data.user?.email ?? "";
+  $("redirect").textContent = data.redirect_uri;
+  $("scope").textContent = data.scope || "(없음)";
+  say("");
+  show("consent");
+}
+
+async function decide(approve) {
+  $("approve").disabled = $("deny").disabled = true;
+  const { data, error } = approve
+    ? await supabase.auth.oauth.approveAuthorization(authorizationId)
+    : await supabase.auth.oauth.denyAuthorization(authorizationId);
+  if (error) {
+    say(`처리하지 못했습니다: ${error.message}`, true);
+    $("approve").disabled = $("deny").disabled = false;
+    return;
+  }
+  location.replace(data.redirect_url);
+}
+
+$("login").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const { error } = await supabase.auth.signInWithPassword({
+    email: $("email").value,
+    password: $("password").value,
+  });
+  if (error) { say(`로그인하지 못했습니다: ${error.message}`, true); return; }
+  $("password").value = "";
+  await showDetails();
+});
+$("approve").addEventListener("click", () => decide(true));
+$("deny").addEventListener("click", () => decide(false));
+
+start();
+</script>
+</body>
+</html>
